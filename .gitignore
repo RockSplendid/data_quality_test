@@ -44,6 +44,7 @@ Thumbs.db
 *.parquet
 *.db
 *.sqlite
+*.txt
 
 # Jupyter Notebook
 .ipynb_checkpoints/
