@@ -19,6 +19,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+fff*
 
 # Virtual environments
 venv/
@@ -45,6 +46,7 @@ Thumbs.db
 *.db
 *.sqlite
 *.txt
+*.json
 
 # Jupyter Notebook
 .ipynb_checkpoints/
