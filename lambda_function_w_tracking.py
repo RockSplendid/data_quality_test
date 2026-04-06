@@ -317,9 +317,9 @@ def lambda_handler(event, context):
         # Write Parquet
         if final_count > 0:
             if is_anomalous:
-                clean_key = source_key.replace('RawZone-Anomalies/', 'CleanZone-Anomalies/')
+                clean_key = source_key.replace('RawZone-Anomalies/', 'CleanZone-RulesBased-Anomalies/')
             else:
-                clean_key = source_key.replace('RawZone/', 'CleanZone/')
+                clean_key = source_key.replace('RawZone/', 'CleanZone-RulesBased/')
             clean_key = os.path.splitext(clean_key)[0] + '.parquet'
             
             temp_parquet = '/tmp/output.parquet'
