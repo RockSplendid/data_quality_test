@@ -201,8 +201,17 @@ def lambda_handler(event, context):
         metrics['initial_record_count'] = initial_count
         log(f"Loaded {initial_count:,} records from Parquet", 'INFO')
         
-        # Add row_id for tracking
-        df['__row_id'] = range(len(df))
+        # Preserve __row_id from upstream (Rule Lambda)
+        # This ensures ML flagged IDs map to original dataset
+        if '__row_id' not in df.columns:
+            # Shouldn't happen in your pipeline, but handle gracefully
+            log("WARNING: __row_id not found, creating new sequential IDs", 'INFO')
+            df['__row_id'] = range(len(df))
+        else:
+            # Use existing __row_id from Rule Lambda (maps to original CSV position)
+            row_id_min = df['__row_id'].min()
+            row_id_max = df['__row_id'].max()
+            log(f"Preserving __row_id from upstream (range: {row_id_min}-{row_id_max})", 'DEBUG')
         
         # Engineer features
         X = engineer_features(df, metadata)

@@ -21,6 +21,7 @@ wheels/
 *.egg
 *.pkl
 fff*
+aaa*
 
 # Virtual environments
 venv/

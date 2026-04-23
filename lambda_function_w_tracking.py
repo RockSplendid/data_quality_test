@@ -35,61 +35,53 @@ def apply_basic_checks(conn, table_name='raw_data'):
     rule_metrics = {}
     all_flagged_ids = []
     
-    # Get flagged row IDs for null CustomerID
-    flagged_customer = conn.execute(f"""
-        SELECT "__row_id" FROM {table_name}
-        WHERE "CustomerID" IS NULL 
-          OR TRIM(CAST("CustomerID" AS VARCHAR)) = ''
-    """).fetchall()
-    flagged_customer_ids = [int(row[0]) for row in flagged_customer]
-    all_flagged_ids.extend(flagged_customer_ids)
-    
-    # Rule: Non-null CustomerID
+    # DATA CLEANING: Trim and standardize string fields
+    log("Cleaning string fields...", 'DEBUG')
     conn.execute(f"""
-        CREATE OR REPLACE TABLE temp_basic_1 AS
-        SELECT * FROM {table_name}
-        WHERE "CustomerID" IS NOT NULL 
-          AND TRIM(CAST("CustomerID" AS VARCHAR)) != ''
+        UPDATE {table_name}
+        SET 
+            "StockCode" = TRIM(UPPER(CAST("StockCode" AS VARCHAR))),
+            "Description" = TRIM(CAST("Description" AS VARCHAR)),
+            "Invoice" = TRIM(UPPER(CAST("Invoice" AS VARCHAR)))
     """)
-    count_after_customer = conn.execute("SELECT COUNT(*) FROM temp_basic_1").fetchone()[0]
-    rule_metrics['null_customer_id'] = {
-        'removed': count_before - count_after_customer,
-        'flagged_ids': flagged_customer_ids
-    }
     
-    # Rule: Valid Price (with exceptions for zero prices and bank charges)
-    # Allow: Price > 0, Price = 0, OR (Price < 0 AND StockCode='B' AND Invoice starts with 'A')
-    flagged_price = conn.execute("""
-        SELECT "__row_id" FROM temp_basic_1
+    # NOTE: NULL CustomerID check REMOVED
+    # Reason: NULL CustomerID rows are legitimate operational entries (postage, adjustments, etc.)
+    # Business rules will catch actual violations (e.g., negative qty without cancellation)
+    
+    # Get flagged row IDs for invalid Price
+    # Flag: Price is null, OR (Price < 0 AND NOT a bank adjustment)
+    flagged_price = conn.execute(f"""
+        SELECT "__row_id" FROM {table_name}
         WHERE NOT (
             TRY_CAST("Price" AS DOUBLE) > 0
             OR TRY_CAST("Price" AS DOUBLE) = 0
             OR (
                 TRY_CAST("Price" AS DOUBLE) < 0
                 AND "StockCode" = 'B'
-                AND SUBSTRING(CAST("Invoice" AS VARCHAR), 1, 1) = 'A'
+                AND SUBSTRING("Invoice", 1, 1) = 'A'
             )
         )
     """).fetchall()
     flagged_price_ids = [int(row[0]) for row in flagged_price]
     all_flagged_ids.extend(flagged_price_ids)
     
-    # Rule: Valid Price
-    conn.execute("""
+    # Rule: Valid Price (positive, zero, or negative bank adjustments only)
+    conn.execute(f"""
         CREATE OR REPLACE TABLE temp_basic_final AS
-        SELECT * FROM temp_basic_1
+        SELECT * FROM {table_name}
         WHERE 
             TRY_CAST("Price" AS DOUBLE) > 0
             OR TRY_CAST("Price" AS DOUBLE) = 0
             OR (
                 TRY_CAST("Price" AS DOUBLE) < 0
                 AND "StockCode" = 'B'
-                AND SUBSTRING(CAST("Invoice" AS VARCHAR), 1, 1) = 'A'
+                AND SUBSTRING("Invoice", 1, 1) = 'A'
             )
     """)
     count_after_price = conn.execute("SELECT COUNT(*) FROM temp_basic_final").fetchone()[0]
     rule_metrics['invalid_price'] = {
-        'removed': count_after_customer - count_after_price,
+        'removed': count_before - count_after_price,
         'flagged_ids': flagged_price_ids,
         'description': 'Removed rows with invalid prices (null, or negative non-bank-adjustments)'
     }
@@ -97,7 +89,6 @@ def apply_basic_checks(conn, table_name='raw_data'):
     # Replace original table
     conn.execute(f"DROP TABLE IF EXISTS {table_name}")
     conn.execute(f"ALTER TABLE temp_basic_final RENAME TO {table_name}")
-    conn.execute("DROP TABLE IF EXISTS temp_basic_1")
     
     processing_time = (datetime.utcnow() - start_time).total_seconds()
     
@@ -326,7 +317,7 @@ def lambda_handler(event, context):
             # Remove __row_id before saving
             conn.execute(f"""
                 CREATE TABLE final_output AS
-                SELECT * EXCLUDE "__row_id" FROM {current_table}
+                SELECT * FROM {current_table}
             """)
             conn.execute(f"COPY final_output TO '{temp_parquet}' (FORMAT PARQUET)")
             
