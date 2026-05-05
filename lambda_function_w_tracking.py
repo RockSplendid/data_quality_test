@@ -144,7 +144,9 @@ def apply_business_rules(conn, table_name='raw_data'):
         SELECT "__row_id" FROM temp_biz_1
         WHERE SUBSTRING(CAST("Invoice" AS VARCHAR), 1, 1) != 'C' 
           AND "Quantity" < 0
+          AND "CustomerID" IS NOT NULL
     """).fetchall()
+
     flagged_regular_ids = [int(row[0]) for row in flagged_regular]
     all_flagged_ids.extend(flagged_regular_ids)
     
@@ -155,6 +157,7 @@ def apply_business_rules(conn, table_name='raw_data'):
         WHERE NOT (
             SUBSTRING(CAST("Invoice" AS VARCHAR), 1, 1) != 'C' 
             AND "Quantity" < 0
+            AND "CustomerID" IS NOT NULL
         )
     """)
     count_after_regular = conn.execute("SELECT COUNT(*) FROM temp_biz_2").fetchone()[0]
@@ -265,6 +268,15 @@ def lambda_handler(event, context):
             SELECT *, ROW_NUMBER() OVER () - 1 AS "__row_id"
             FROM read_csv_auto('{temp_csv}')
         """)
+
+        # Clean column names (remove spaces) - HANDLE BOTH CASES
+        columns = conn.execute("PRAGMA table_info(raw_data)").fetchall()
+        for col in columns:
+            old_name = col[1]
+            if ' ' in old_name:
+                new_name = old_name.replace(' ', '')
+                conn.execute(f'ALTER TABLE raw_data RENAME COLUMN "{old_name}" TO "{new_name}"')
+                log(f"Renamed column: '{old_name}' → '{new_name}'", 'DEBUG')
         
         initial_count = conn.execute("SELECT COUNT(*) FROM raw_data").fetchone()[0]
         metrics['initial_record_count'] = initial_count

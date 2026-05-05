@@ -23,7 +23,7 @@ S3_MODEL_KEY = 'models/isolation_forest_model.pkl'
 S3_METADATA_KEY = 'models/feature_metadata.json'
 
 # Model parameters
-CONTAMINATION = 0.02  # 2% expected anomalies
+CONTAMINATION = 0.001  # 2% expected anomalies
 RANDOM_STATE = 42
 N_ESTIMATORS = 100
 
@@ -92,14 +92,33 @@ def engineer_features(df, fit=True, label_encoders=None):
     df_features['AbsPrice'] = df_features['Price_clean'].abs()
     
     # ==========================================
+    # PATTERN DETECTION FEATURES
+    # ==========================================
+    
+    # Decimal quantity detection
+    df_features['is_decimal_qty'] = ((df_features['Quantity_clean'] % 1) != 0).astype(int)
+    
+    # Round number detection
+    df_features['is_round_price'] = df_features['Price_clean'].isin([100.0, 200.0, 500.0, 1000.0, 5000.0]).astype(int)
+    df_features['is_round_qty'] = df_features['AbsQuantity'].isin([100.0, 500.0, 1000.0, 5000.0, 10000.0]).astype(int)
+    
+    # Unusual ratio detection
+    df_features['high_price_low_qty'] = ((df_features['Price_clean'] > 100) & (df_features['AbsQuantity'] < 10)).astype(int)
+    df_features['low_price_high_qty'] = ((df_features['Price_clean'] < 1) & (df_features['AbsQuantity'] > 1000)).astype(int)
+    
+    # Extreme value flags
+    df_features['is_extreme_price'] = (df_features['Price_clean'] > 200).astype(int)
+    df_features['is_extreme_qty'] = (df_features['AbsQuantity'] > 500).astype(int)
+    
+    # ==========================================
     # TEMPORAL FEATURES
     # ==========================================
     
     df_features['Hour'] = df_features['InvoiceDate'].dt.hour
-    df_features['DayOfWeek'] = df_features['InvoiceDate'].dt.dayofweek  # 0=Monday, 6=Sunday
+    df_features['DayOfWeek'] = df_features['InvoiceDate'].dt.dayofweek
     df_features['Month'] = df_features['InvoiceDate'].dt.month
     df_features['DayOfMonth'] = df_features['InvoiceDate'].dt.day
-    df_features['IsWeekend'] = (df_features['DayOfWeek'] >= 5).astype(int)  # Saturday=5, Sunday=6
+    df_features['IsWeekend'] = (df_features['DayOfWeek'] >= 5).astype(int)
     
     # ==========================================
     # CATEGORICAL FEATURES (ENCODED)
@@ -114,17 +133,16 @@ def engineer_features(df, fit=True, label_encoders=None):
     df_features['QuantitySign'] = np.where(df_features['Quantity_clean'] > 0, 1,
                                            np.where(df_features['Quantity_clean'] < 0, -1, 0))
     
-    # StockCode frequency encoding (how common is this stock code)
+    # StockCode frequency encoding
     if fit:
         stockcode_freq = df_features['StockCode'].value_counts(normalize=True).to_dict()
         df_features['StockCode_freq'] = df_features['StockCode'].map(stockcode_freq).fillna(0)
         label_encoders['stockcode_freq'] = stockcode_freq
     else:
-        # Use pre-computed frequencies from training
         stockcode_freq = label_encoders.get('stockcode_freq', {})
         df_features['StockCode_freq'] = df_features['StockCode'].map(stockcode_freq).fillna(0)
     
-    # Country encoding (one-hot for top 10, "Other" for rest)
+    # Country encoding
     if fit:
         top_countries = df_features['Country'].value_counts().head(10).index.tolist()
         label_encoders['top_countries'] = top_countries
@@ -142,23 +160,23 @@ def engineer_features(df, fit=True, label_encoders=None):
     feature_columns = [
         # Numerical
         'Price_clean', 'Quantity_clean', 'TotalAmount', 'AbsQuantity', 'AbsPrice',
+        # Pattern detection
+        'is_decimal_qty', 'is_round_price', 'is_round_qty',
+        'high_price_low_qty', 'low_price_high_qty',
+        'is_extreme_price', 'is_extreme_qty',
         # Temporal
         'Hour', 'DayOfWeek', 'Month', 'DayOfMonth', 'IsWeekend',
         # Categorical
         'IsCancellation', 'PriceSign', 'QuantitySign', 'StockCode_freq',
-        # Country one-hot
     ] + [f'Country_{c}' for c in top_countries] + ['Country_Other']
     
     features_df = df_features[feature_columns].copy()
-    
-    # Handle any remaining NaN values
     features_df = features_df.fillna(0)
     
     print(f"✓ Engineered {len(feature_columns)} features")
     print(f"  Feature list: {feature_columns[:5]}... (+{len(feature_columns)-5} more)")
     
     if fit:
-        # Store metadata for inference
         metadata = {
             'feature_columns': feature_columns,
             'top_countries': top_countries,

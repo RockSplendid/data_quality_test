@@ -118,6 +118,90 @@ def inject_anomalies(df):
     anomalies_injected['Zero Quantities'] = zero_qty_size
     print(f"  ✓ Injected {zero_qty_size:,} zero quantities")
     
+    # ==================================================================
+    # NEW: Suspicious Round Numbers (ML-Detectable)
+    # ==================================================================
+    
+    print("\n📌 ML-Detectable: Suspicious Round Numbers")
+    
+    # Track which indices are already corrupted
+    corrupted_indices = set(ground_truth['anomaly_indices'])
+    
+    # Select rows that haven't been corrupted yet
+    available_indices = df_anomaly[~df_anomaly.index.isin(corrupted_indices)].index
+    
+    if len(available_indices) > 0:
+        violation_size = min(int(len(df_anomaly) * 0.001), 1000)  # 0.01% = ~1000 rows
+        violation_idx = np.random.choice(available_indices, violation_size, replace=False)
+        
+        # Track ground truth
+        for idx in violation_idx:
+            row_id = int(df_anomaly.loc[idx, '__row_id'])
+            if row_id not in ground_truth['anomaly_indices']:
+                ground_truth['anomaly_indices'].append(row_id)
+            if row_id not in ground_truth['anomaly_details']:
+                ground_truth['anomaly_details'][row_id] = []
+            ground_truth['anomaly_details'][row_id].append('ml_suspicious_round')
+        
+        # Inject anomaly - set to exact round numbers
+        round_prices = [100.00, 200.00, 500.00, 1000.00, 5000.00]
+        round_qtys = [100, 500, 1000, 5000, 10000]
+        
+        for idx in violation_idx:
+            df_anomaly.loc[idx, 'Price'] = np.random.choice(round_prices)
+            df_anomaly.loc[idx, 'Quantity'] = np.random.choice(round_qtys)
+        
+        anomalies_injected['Suspicious Round Numbers'] = violation_size
+        print(f"  ✓ Injected {violation_size:,} suspicious round numbers")
+    
+
+    # ==================================================================
+    # NEW: Extreme Total Amount (ML-Detectable)
+    # ==================================================================
+    
+    print("\n📌 ML-Detectable: Extreme Total Amount")
+    
+    # Update corrupted indices
+    corrupted_indices = set(ground_truth['anomaly_indices'])
+    
+    # Select rows with positive Price and Quantity that haven't been corrupted
+    available_candidates = df_anomaly[
+        (df_anomaly['Price'] > 0) & 
+        (df_anomaly['Quantity'] > 0) &
+        (~df_anomaly.index.isin(corrupted_indices))
+    ].index
+    
+    if len(available_candidates) > 0:
+        violation_size = min(int(len(df_anomaly) * 0.001), 1000)  # ~1,000 rows
+        violation_idx = np.random.choice(available_candidates, 
+                                        min(violation_size, len(available_candidates)), 
+                                        replace=False)
+        
+        # Track ground truth
+        for idx in violation_idx:
+            row_id = int(df_anomaly.loc[idx, '__row_id'])
+            if row_id not in ground_truth['anomaly_indices']:
+                ground_truth['anomaly_indices'].append(row_id)
+            if row_id not in ground_truth['anomaly_details']:
+                ground_truth['anomaly_details'][row_id] = []
+            ground_truth['anomaly_details'][row_id].append('ml_extreme_total')
+        
+        # Calculate extreme thresholds (P99.9)
+        price_p999 = df_anomaly[df_anomaly['Price'] > 0]['Price'].quantile(0.999)
+        qty_p999 = df_anomaly[df_anomaly['Quantity'] > 0]['Quantity'].quantile(0.999)
+        
+        print(f"  P99.9 thresholds: Price={price_p999:.2f}, Qty={qty_p999:.0f}")
+        
+        # Inject anomaly - set to 10x-100x the P99.9
+        for idx in violation_idx:
+            df_anomaly.loc[idx, 'Price'] = price_p999 * np.random.uniform(10, 100)
+            df_anomaly.loc[idx, 'Quantity'] = int(qty_p999 * np.random.uniform(10, 100))
+        
+        anomalies_injected['Extreme Total Amount'] = len(violation_idx)
+        print(f"  ✓ Injected {len(violation_idx):,} extreme total amounts")
+        print(f"       TotalAmount range: {(price_p999*10*qty_p999*10):,.0f} - {(price_p999*100*qty_p999*100):,.0f}")
+
+
     # Finalize ground truth
     ground_truth['anomaly_indices'] = sorted(list(set(ground_truth['anomaly_indices'])))
     ground_truth['total_anomalies_injected'] = len(ground_truth['anomaly_indices'])

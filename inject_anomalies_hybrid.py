@@ -9,11 +9,12 @@ import numpy as np
 import boto3
 import os
 import json
+from io import BytesIO
 from datetime import datetime
 
 # Configuration
 BUCKET_NAME = 'datasourcebucket1109'
-LOCAL_CLEAN_FILE = 'online_retail_II.csv'
+S3_CLEAN_KEY = 'RawZone/online_retail_II.csv'
 OUTPUT_FILE = 'online_retail_II_anomalies.csv'
 GROUND_TRUTH_FILE = 'online_retail_II_ground_truth.json'
 S3_UPLOAD_KEY = 'RawZone-Anomalies/online_retail_II_anomalies.csv'
@@ -364,15 +365,15 @@ def main():
     print("🚀 ANOMALY INJECTION v4: PERCENTILE-BASED TRUE OUTLIERS")
     print("="*70)
     
-    # Load data
-    print(f"\n📂 Loading: {LOCAL_CLEAN_FILE}")
+    # Load data from S3
+    print(f"\n📂 Loading from S3: s3://{BUCKET_NAME}/{S3_CLEAN_KEY}")
     try:
-        df = pd.read_csv(LOCAL_CLEAN_FILE)
-        if ' ' in df.columns[0]:
-            df.columns = df.columns.str.replace(' ', '')
+        response = s3_client.get_object(Bucket=BUCKET_NAME, Key=S3_CLEAN_KEY)
+        df = pd.read_csv(BytesIO(response['Body'].read()))
+        df.columns = df.columns.str.replace(' ', '')
         print(f"✓ Loaded {len(df):,} rows")
-    except FileNotFoundError:
-        print(f"❌ File not found: {LOCAL_CLEAN_FILE}")
+    except Exception as e:
+        print(f"❌ Failed to load clean data from S3: {e}")
         return
     
     # Inject

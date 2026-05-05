@@ -87,6 +87,18 @@ def engineer_features(df, metadata):
     df_features['AbsPrice'] = df_features['Price_clean'].abs()
     
     # ==========================================
+    # PATTERN DETECTION FEATURES
+    # ==========================================
+    
+    df_features['is_decimal_qty'] = ((df_features['Quantity_clean'] % 1) != 0).astype(int)
+    df_features['is_round_price'] = df_features['Price_clean'].isin([100.0, 200.0, 500.0, 1000.0, 5000.0]).astype(int)
+    df_features['is_round_qty'] = df_features['AbsQuantity'].isin([100.0, 500.0, 1000.0, 5000.0, 10000.0]).astype(int)
+    df_features['high_price_low_qty'] = ((df_features['Price_clean'] > 100) & (df_features['AbsQuantity'] < 10)).astype(int)
+    df_features['low_price_high_qty'] = ((df_features['Price_clean'] < 1) & (df_features['AbsQuantity'] > 1000)).astype(int)
+    df_features['is_extreme_price'] = (df_features['Price_clean'] > 200).astype(int)
+    df_features['is_extreme_qty'] = (df_features['AbsQuantity'] > 500).astype(int)
+    
+    # ==========================================
     # TEMPORAL FEATURES
     # ==========================================
     
@@ -107,11 +119,9 @@ def engineer_features(df, metadata):
     df_features['QuantitySign'] = np.where(df_features['Quantity_clean'] > 0, 1,
                                            np.where(df_features['Quantity_clean'] < 0, -1, 0))
     
-    # StockCode frequency (use training frequencies)
     stockcode_freq = metadata.get('stockcode_freq', {})
     df_features['StockCode_freq'] = df_features['StockCode'].map(stockcode_freq).fillna(0)
     
-    # Country encoding (use training top countries)
     top_countries = metadata.get('top_countries', [])
     for country in top_countries:
         df_features[f'Country_{country}'] = (df_features['Country'] == country).astype(int)
