@@ -1,244 +1,169 @@
-# Anomaly Injection Code - Key Improvements
+# Hybrid Data Quality Pipeline on AWS (Rules + ML)
 
-## 🎯 Overview
+A serverless data quality pipeline for the **Online Retail II** dataset (UCI, ~1.07M transactions, Dec 2009 – Dec 2011).
+Raw CSV files dropped in S3 are cleaned in two sequential stages:
 
-This document outlines the critical improvements made to the anomaly injection approach for the Online Retail II dataset, transforming it from a naive pattern-matching system to a business-logic-aware data quality testing framework.
+1. **Rule-based checks** – a DuckDB-powered AWS Lambda that removes rows violating business rules.
+2. **ML anomaly detection** – a containerised AWS Lambda running an **Isolation Forest** that catches statistical outliers the rules can't express.
 
----
-
-## Before: Naive Approach ❌
-
-### What Was Wrong
-
-**1. Misidentified Legitimate Business Data as Anomalies**
-- Treated negative quantities as anomalies
-  - Reality: Negative quantities are valid returns/cancellations (InvoiceNo starts with 'C')
-- Flagged negative prices as errors
-  - Reality: These could be legitimate adjustments or refunds
-- Considered missing CustomerIDs as data quality issues
-  - Reality: These represent documented guest checkouts
-
-**2. Didn't Respect Business Logic**
-- No understanding of cancellation rules
-- No validation of invoice-customer relationships
-- No temporal business constraints
-- Generic violations that don't reflect real-world issues
-
-**3. Limited Testing Scope**
-- Only 8 generic anomaly types
-- No category organization
-- Missing critical business rule violations
-- No differentiation between severity levels
+To measure how well this works, anomalies are deliberately injected into a copy of the data together with a **ground truth** file, and every flagged row is traced back to its original position so **Precision, Recall and F1** can be computed for *Rules-only* vs *Hybrid (Rules + ML)*.
 
 ---
 
-## After: Business-Logic Aware Approach ✅
+## Architecture
 
-### What Changed
-
-**1. Respects Actual Business Rules**
-- Understands that cancellations (InvoiceNo starts with 'C') should have negative quantities
-- Recognizes that regular invoices should have positive quantities
-- Validates invoice-level consistency (same invoice = same date, same customer)
-- Enforces referential integrity rules
-
-**2. Injects TRUE Violations**
-- **Business Rule Violations**: Operations that break documented business logic
-- **Data Integrity Issues**: Violations of relational constraints
-- **Statistical Outliers**: Values beyond reasonable business ranges
-- **Temporal Anomalies**: Impossible or chronologically invalid dates
-- **Duplicate Anomalies**: Various forms of data duplication
-- **Missing Data**: Strategic absence of required fields
-- **Schema Violations**: Format and type constraints
-
-**3. Comprehensive Testing Framework**
-- **16 distinct anomaly types** (up from 8)
-- **7 organized categories** for systematic testing
-- **Detailed tracking** with summary reports
-- **Realistic distributions** based on actual business scenarios
-
----
-
-## 📋 New Anomaly Types (16 Total)
-
-### 1. Business Rule Violations (4 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Cancellation with Positive Quantity** | InvoiceNo starts with 'C' but Quantity > 0 | Violates core business logic: cancellations must reduce inventory |
-| **Regular Invoice with Negative Quantity** | InvoiceNo doesn't start with 'C' but Quantity < 0 | Invalid: only cancellations can have negative quantities |
-| **Zero Quantities** | Any transaction with Quantity = 0 | Meaningless transaction: no items exchanged |
-| **Same Invoice Different Customers** | One InvoiceNo assigned to multiple CustomerIDs | Referential integrity violation: invoices belong to one customer |
-
-### 2. Data Integrity Issues (3 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Missing CustomerID with Country** | Country exists but CustomerID is null | Illogical: if you know where they're from, you should know who they are |
-| **Inconsistent Invoice Dates** | Same InvoiceNo has different InvoiceDates | Impossible: an invoice is created at one point in time |
-| **Invoice-Customer Inconsistency** | Related records don't match expected relationships | Breaks referential integrity assumptions |
-
-### 3. Statistical Outliers (3 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Extreme Quantity Outliers** | Quantities of 50K-500K units | Beyond reasonable business scale (testing outlier detection) |
-| **Unrealistic High Prices** | Unit prices of £10K-100K | Far exceeds typical product pricing (statistical anomaly) |
-| **Negative Unit Prices** | UnitPrice < 0 | Invalid: prices can't be negative (different from refunds) |
-
-### 4. Temporal Anomalies (2 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Future Dates** | Transactions dated after current date | Impossible: can't record what hasn't happened |
-| **Pre-Business Dates** | Transactions before Dec 2009 | Invalid: business didn't exist yet |
-
-### 5. Duplicate Anomalies (2 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Exact Duplicate Rows** | Identical records appearing multiple times | Data quality issue: accidental duplication |
-| **Logical Duplicates** | Same invoice+product but different price | Business logic violation: price should be consistent |
-
-### 6. Missing Data (2 types)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Missing Descriptions** | Product description is null | Completeness issue: reduces data utility |
-| **Missing Country** | Country field is null | Critical field: should always be present |
-
-### 7. Schema Violations (1 type)
-
-| Anomaly | Description | Why It Matters |
-|---------|-------------|----------------|
-| **Invalid StockCode Format** | Special characters, NULL strings, etc. | Format validation: codes should follow patterns |
-
----
-
-## 🎁 Additional Features
-
-### 1. Categorized Output
-Anomalies are now grouped by category for easier analysis:
-```
-Business Rule Violations:
-  • Cancellation with Positive Quantity: 1,234
-  • Regular Invoice with Negative Quantity: 854
-
-Data Integrity Issues:
-  • Missing CustomerID with Country: 3,210
-  • Inconsistent Invoice Dates: 500
+```mermaid
+flowchart LR
+    A[online_retail_II.csv] -->|inject_anomalies_hybrid.py| B[(S3: RawZone-Anomalies/<br/>anomalies.csv + ground_truth.json)]
+    A0[(S3: RawZone/<br/>clean CSV)] --> R
+    B --> R[Rules Lambda<br/>lambda_function_w_tracking.py<br/>DuckDB]
+    R -->|Parquet + __row_id| C[("S3: CleanZone-RulesBased[-Anomalies]/")]
+    R -->|flagged row IDs| M1[(S3: metrics/clean or anomalies/)]
+    C --> ML[ML Lambda container<br/>lambda_ml_detector.py<br/>Isolation Forest]
+    MD[(S3: models/<br/>model.pkl + feature_metadata.json)] --> ML
+    ML -->|Parquet| F[("S3: CleanZone-Final[-Anomalies]/")]
+    ML -->|flagged row IDs| M2[(S3: metrics/ml/...)]
+    M1 --> E[evaluate_hybrid_corrected.py]
+    M2 --> E
+    B --> E
+    E --> EV[(S3: evaluations/ + local JSON report)]
 ```
 
-### 2. Anomaly Summary File
-Automatically generates a text file (`*_anomaly_summary.txt`) containing:
-- Total rows (original vs final)
-- Complete breakdown by category
-- Count for each anomaly type
-- Easy reference for pipeline testing
+### S3 bucket layout
 
-### 3. Smart Injection Logic
-- Respects existing data patterns
-- Uses realistic distributions
-- Avoids overwriting legitimate data unnecessarily
-- Maintains statistical properties of the original dataset
+| Prefix | Written by | Contents |
+|---|---|---|
+| `RawZone/` | you (upload) | Original clean `online_retail_II.csv` |
+| `RawZone-Anomalies/` | `inject_anomalies_hybrid.py` | Corrupted CSV + `online_retail_II_ground_truth.json` |
+| `CleanZone-RulesBased/`, `CleanZone-RulesBased-Anomalies/` | Rules Lambda | Parquet that passed the rules (keeps `__row_id`) |
+| `CleanZone-Final/`, `CleanZone-Final-Anomalies/` | ML Lambda | Final Parquet after ML filtering |
+| `metrics/{clean,anomalies}/YYYY/MM/DD/` | Rules Lambda | Per-run JSON: counts, timings, per-rule removals, `all_flagged_row_ids` |
+| `metrics/ml/{clean,anomalies}/YYYY/MM/DD/` | ML Lambda | Per-run JSON: `ml_flagged_count`, `flagged_row_ids` |
+| `models/` | `train_isolation_forest.py` | `isolation_forest_model.pkl`, `feature_metadata.json` |
+| `evaluations/` | `evaluate_hybrid_corrected.py` | Rules-vs-Hybrid evaluation reports |
 
-### 4. Configurable Injection Rates
-Each anomaly type has a tuned injection rate:
-- Critical violations: 0.5-1% (realistic rarity)
-- Common issues: 1-3% (more frequent)
-- Rare problems: 0.2-0.5% (edge cases)
+**Row tracking:** the Rules Lambda adds `__row_id` (the row's position in the source CSV) and passes it through to the ML stage, so IDs flagged by either stage can be matched against the ground truth. Because the stages run in sequence, a row removed by the rules never reaches the ML model – Rules and ML flags should never overlap (the evaluator warns if they do).
 
 ---
 
-## 💡 Why This Matters for Your Pipeline
+## Stage 1 – Rule-based checks
 
-### Before (Naive Approach)
-```python
-# False Positives
-if quantity < 0:
-    flag_as_anomaly()  # ❌ Wrong! Could be a valid return
+`lambda_function_w_tracking.py` (current version). Triggered by S3 uploads to `RawZone/` or `RawZone-Anomalies/`.
 
-if customer_id is None:
-    flag_as_anomaly()  # ❌ Wrong! Could be guest checkout
-```
+Before the rules run, it removes spaces from column names (`Customer ID` → `CustomerID`) and trims/upper-cases `StockCode`, `Invoice` and `Description`.
 
-### After (Business-Logic Aware)
-```python
-# True Validation
-if invoice_no.startswith('C') and quantity > 0:
-    flag_as_anomaly()  # ✅ Correct! Cancellation should be negative
+| Group (env toggle) | Rule | Row is removed when… |
+|---|---|---|
+| Basic checks (`ENABLE_BASIC_CHECKS`) | Valid price | `Price` is null/non-numeric, or negative **unless** it's a bank-debt adjustment (`StockCode = 'B'` and invoice starts with `A`) |
+| Business rules (`ENABLE_BUSINESS_RULES`) | Cancellation sign | Invoice starts with `C` but `Quantity > 0` |
+| | Regular-invoice sign | Invoice doesn't start with `C`, `Quantity < 0`, and `CustomerID` is present |
+| | Zero quantity | `Quantity = 0` |
 
-if not invoice_no.startswith('C') and quantity < 0:
-    flag_as_anomaly()  # ✅ Correct! Regular sale should be positive
-```
+Rules are based on what the data actually means, so they don't produce false positives on legitimate data:
 
-### Benefits
-1. **No False Positives**: Your pipeline learns to distinguish legitimate patterns from errors
-2. **Realistic Testing**: Anomalies mirror actual production issues
-3. **Comprehensive Coverage**: Tests multiple failure modes
-4. **Measurable Quality**: Clear metrics for detection accuracy
-5. **Production-Ready**: Rules transfer directly to real monitoring
+- **Missing `CustomerID` is not an error.** These are guest checkouts and operational entries (postage, adjustments).
+- **Negative quantities are valid on cancellations.** A `C` invoice is expected to have them.
+- **Negative quantities with no customer are valid.** These are stock write-offs and adjustments.
 
----
+Other settings: `BUCKET_NAME`, `LOG_LEVEL` (`ERROR` / `INFO` / `DEBUG`).
 
-## 📊 Injection Statistics
+## Stage 2 – ML anomaly detection
 
-| Category | Number of Types | Typical Injection Rate | Priority |
-|----------|----------------|----------------------|----------|
-| Business Rule Violations | 4 | 0.8-3% | 🔴 Critical |
-| Data Integrity Issues | 3 | 1-5% | 🔴 Critical |
-| Statistical Outliers | 3 | 0.3-0.8% | 🟡 High |
-| Temporal Anomalies | 2 | 0.2-0.4% | 🟡 High |
-| Duplicate Anomalies | 2 | 0.5-0.8% | 🟢 Medium |
-| Missing Data | 2 | 1-2.5% | 🟢 Medium |
-| Schema Violations | 1 | 0.4% | 🟢 Medium |
+- **Training** – `ML Layer/train_isolation_forest.py` trains a scikit-learn `IsolationForest` (`n_estimators=100`, `contamination=0.001`, `random_state=42`) on the original clean CSV and uploads the model and feature metadata to `s3://<bucket>/models/`.
+- **Features (32)**:
+  - Numeric: price, quantity, total amount, and their absolute values.
+  - Pattern flags: decimal quantity, round price/quantity, high-price/low-quantity, low-price/high-quantity, extreme price/quantity.
+  - Time: hour, day of week, month, day of month, weekend.
+  - Category: is-cancellation, price sign, quantity sign, StockCode frequency, one-hot top-10 countries plus "Other".
+- **Inference** – `ML Layer/lambda_ml_detector.py` is triggered by Parquet files in `CleanZone-RulesBased[-Anomalies]/`. It caches the model between invocations, removes rows predicted as anomalies (`-1`), and writes the final Parquet and the ML metrics.
+- **Deployment** – the ML Lambda is deployed as a **container image**, because scikit-learn and pandas exceed the Lambda layer size limit. `ML Layer/deploy_container.sh` does the following:
+  - Creates the ECR repo `ml-anomaly-detector` in `eu-north-1`.
+  - Builds and pushes the image from `ML Layer/Dockerfile` (base image `public.ecr.aws/lambda/python:3.11`).
+  - Creates or updates the function `lambda-ml-detector` with 2048 MB memory and a 300 s timeout.
+  - Creates its IAM role with S3 access.
+  - Prints the S3 trigger configuration to apply.
 
-**Total**: ~10-15% of records affected (with some overlap possible)
+  `build_and_upload_layer.sh` is the earlier layer-based approach that was replaced by the container.
 
----
+## Anomaly injection & ground truth
 
-## 🚀 Next Steps for Your Pipeline
+`inject_anomalies_hybrid.py` (v4) loads the clean CSV from `RawZone/`, corrupts a random set of distinct rows, and uploads the corrupted CSV and `online_retail_II_ground_truth.json` (row IDs plus the reason each was corrupted) to `RawZone-Anomalies/`. Thresholds are relative to the data's own 99th percentile (P99) of price and quantity.
 
-With these realistic anomalies, you can now build detection rules for:
+| Type | Anomaly | Max rows |
+|---|---|---|
+| **Rule-based** – rules should catch | Cancellation with positive quantity | 500 |
+| | Regular invoice with negative quantity | 300 |
+| | Zero quantity | 200 |
+| **ML-detectable** – ML should catch | Extreme price (10–50× P99) | 250 |
+| | Extreme quantity (10–50× P99) | 250 |
+| | Extreme total amount (price 5–20× and quantity 5–20× P99) | 200 |
+| | Unusual price/quantity ratio (luxury item ×1, or £0.01 × huge bulk) | 150 |
+| | Decimal quantity | 100 |
+| | Suspiciously round price/quantity (e.g. £100 × 1000) | 100 |
 
-1. **Business Logic Validators**
-   - Cancellation quantity checks
-   - Invoice consistency validators
-   - Cross-field validation rules
+## Evaluation
 
-2. **Statistical Monitors**
-   - Outlier detection algorithms
-   - Distribution shift detection
-   - Anomaly scoring systems
+`evaluate_hybrid_corrected.py` downloads the ground truth and the latest Rules and ML metrics, then compares:
 
-3. **Data Quality Metrics**
-   - Completeness scores
-   - Consistency rates
-   - Accuracy measurements
+- **Rules-only** – rows flagged by Stage 1
+- **Hybrid** – the union of Stage 1 and Stage 2 flags
 
-4. **Alerting Rules**
-   - Critical violations → immediate alerts
-   - Medium issues → daily reports
-   - Low priority → weekly summaries
+For each approach it reports the confusion matrix, Precision, Recall, F1 and Accuracy, plus the F1 improvement from adding ML and how many of the ML-only catches were real anomalies versus false positives. The report is saved locally as `hybrid_evaluation_<timestamp>.json` and uploaded to `evaluations/`.
+
+A separate *ML-only* score isn't reported. The ML stage only sees rows the rules let through, so scoring it alone against the full dataset would be misleading.
 
 ---
 
-## 📝 Summary
+## How to run
 
-| Aspect | Before | After |
-|--------|--------|-------|
-| **Anomaly Types** | 8 generic | 16 business-specific |
-| **Categories** | Unorganized | 7 structured categories |
-| **Business Logic** | ❌ Ignored | ✅ Enforced |
-| **False Positives** | High | Minimal |
-| **Real-World Applicability** | Low | High |
-| **Testing Coverage** | Basic | Comprehensive |
-| **Documentation** | Minimal | Detailed summary files |
+**Prerequisites**
+- An AWS account and the AWS CLI configured (the scripts use the default credential chain; no keys are stored in the code).
+- An S3 bucket. Code defaults to `datasourcebucket1109`; change `BUCKET_NAME` in the scripts and Lambda env vars.
+- Docker, and Python 3.11 with `pandas numpy boto3 scikit-learn duckdb pyarrow`.
+- The dataset: [Online Retail II (Kaggle mirror)](https://www.kaggle.com/datasets/mashlyn/online-retail-ii-uci).
+
+**Steps**
+
+1. Upload `online_retail_II.csv` to `s3://<bucket>/RawZone/`.
+2. Deploy the **Rules Lambda** from `lambda_function_w_tracking.py` (Python runtime, with DuckDB available, e.g. via a layer). Add an S3 trigger for the `RawZone/` and `RawZone-Anomalies/` prefixes with suffix `.csv`, and give it read/write access to the bucket. Uploading the clean CSV produces the clean-baseline metrics.
+3. Train the model: `cd "ML Layer" && python train_isolation_forest.py`. This expects the CSV at `../online_retail_II.csv`.
+4. Deploy the **ML Lambda**: `cd "ML Layer" && ./deploy_container.sh`. Then add S3 triggers for **both** `CleanZone-RulesBased/` and `CleanZone-RulesBased-Anomalies/` with suffix `.parquet`. The command the script prints only covers the first prefix.
+5. Inject anomalies: `python inject_anomalies_hybrid.py`. Uploading the result starts Rules → ML automatically.
+6. When both Lambdas have finished, evaluate with `python evaluate_hybrid_corrected.py`.
 
 ---
 
-## 🎯 Conclusion
+## Repository structure
 
-The improved anomaly injection approach transforms your data quality pipeline from a simple pattern matcher into a sophisticated business-logic-aware validation system. By respecting the actual semantics of the data and injecting true violations, you can build detection systems that work effectively in production environments.
+**Current pipeline**
 
-**Key Takeaway**: Always understand your data's business context before defining what constitutes an "anomaly." What looks like an error might be a legitimate business pattern, and vice versa.
+| File | Purpose |
+|---|---|
+| `lambda_function_w_tracking.py` | **Rules Lambda (current)**: rules, row-ID tracking, writes to `CleanZone-RulesBased*` |
+| `ML Layer/train_isolation_forest.py` | Feature engineering + Isolation Forest training, uploads model to S3 |
+| `ML Layer/lambda_ml_detector.py` | **ML Lambda (current)** |
+| `ML Layer/Dockerfile`, `ML Layer/deploy_container.sh` | Container build & deployment of the ML Lambda |
+| `inject_anomalies_hybrid.py` | **Anomaly injector (current, v4)**: rule-based and ML-detectable anomalies plus ground truth |
+| `evaluate_hybrid_corrected.py` | **Evaluator (current)**: Rules-only vs Hybrid |
+
+**Earlier stages, kept for reference**
+
+| File | Purpose |
+|---|---|
+| `test.py`, `df_prof.py` | Initial dataset profiling with DuckDB and first anomaly experiments |
+| `lambda_function.py`, `lambda_mvp.py` | MVP Lambda (null CustomerID + price > 0 rules) and a local runner for it |
+| `lambda_function_modular.py`, `test_lambda_function_modular.py` | Modular rule groups with env toggles, incl. data-integrity checks; local test runner |
+| `Major Update/lambda_function.py` | Row-ID tracking version that wrote to `CleanZone*/` (replaced by `lambda_function_w_tracking.py`) |
+| `inject_anomalies.py`, `inject_anomalies_v2.py` | Earlier injectors: rule violations only, then with ground truth and the first ML-type anomalies |
+| `evaluate_performance.py`, `evaluate_hybrid_performance.py` | Rules-only evaluation; first 3-way evaluator (Rules / ML / Hybrid) |
+| `compare_metrics.py` | Compares rule metrics from the clean run with the anomalous run |
+| `ML Layer/build_and_upload_layer.sh` | Earlier Lambda-layer packaging of scikit-learn (replaced by the container) |
+
+---
+
+## Known limitations / to-do
+
+- `ML Layer/Dockerfile` copies a `requirements.txt` that isn't committed: `.gitignore` excludes all `*.txt` files. Add it, e.g. with `!ML Layer/requirements.txt`, so the image can be rebuilt from the repo.
+- The Isolation Forest is trained on the raw CSV, including rows the rules would remove. Training on rule-cleaned data would give the model a cleaner idea of "normal".
+- The bucket name, region and file paths are hardcoded in several scripts. Moving them to config or env vars would make the project easier to reuse.
+- The injector uses unseeded randomness, so each run produces a different ground truth.
